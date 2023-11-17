@@ -375,16 +375,6 @@ def train(args):
                         )
 
             current_loss = loss.detach().item()
-            if args.logging_dir is not None:
-                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
-                if (
-                    args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
-                ):  # tracking d*lr value
-                    logs["lr/d*lr"] = (
-                        lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
-                    )
-                accelerator.log(logs, step=global_step)
-
             if epoch == 0:
                 loss_list.append(current_loss)
             else:
@@ -394,6 +384,18 @@ def train(args):
             avr_loss = loss_total / len(loss_list)
             logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
+            
+            if args.logging_dir is not None:
+                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0]), "loss/average":avr_loss}
+                if (
+                    args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy".lower()
+                ):  # tracking d*lr value
+                    logs["lr/d*lr"] = (
+                        lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
+                    )
+                accelerator.log(logs, step=global_step)
+
+            
 
             if global_step >= args.max_train_steps:
                 break

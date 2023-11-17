@@ -360,6 +360,7 @@ def train(args):
             init_kwargs = toml.load(args.log_tracker_config)
         accelerator.init_trackers("finetuning" if args.log_tracker_name is None else args.log_tracker_name, init_kwargs=init_kwargs)
 
+    loss_total = 0
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
@@ -367,7 +368,7 @@ def train(args):
         for m in training_models:
             m.train()
 
-        loss_total = 0
+        
         for step, batch in enumerate(train_dataloader):
             current_step.value = global_step
             with accelerator.accumulate(training_models[0]):  # 複数モデルに対応していない模様だがとりあえずこうしておく
@@ -525,8 +526,13 @@ def train(args):
                         )
 
             current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
+             # TODO moving averageにする
+            loss_total += current_loss
+            avr_loss = loss_total / global_step
+            logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
             if args.logging_dir is not None:
-                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0])}
+                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0]), "loss/average":avr_loss}
                 if (
                     args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy"
                 ):  # tracking d*lr value
@@ -535,12 +541,7 @@ def train(args):
                     )
                 accelerator.log(logs, step=global_step)
 
-            # TODO moving averageにする
-            loss_total += current_loss
-            avr_loss = loss_total / (step + 1)
-            logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-
+            
             if global_step >= args.max_train_steps:
                 break
 
