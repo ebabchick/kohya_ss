@@ -5,10 +5,21 @@ import gc
 import math
 import os
 from multiprocessing import Value
+from typing import List
 import toml
 
 from tqdm import tqdm
 import torch
+
+try:
+    import intel_extension_for_pytorch as ipex
+
+    if torch.xpu.is_available():
+        from library.ipex import ipex_init
+
+        ipex_init()
+except Exception:
+    pass
 from accelerate.utils import set_seed
 from diffusers import DDPMScheduler
 from library import sdxl_model_util
@@ -26,8 +37,59 @@ from library.custom_train_functions import (
     prepare_scheduler_for_custom_training,
     scale_v_prediction_loss_like_noise_prediction,
     add_v_prediction_like_loss,
+    apply_debiased_estimation,
 )
 from library.sdxl_original_unet import SdxlUNet2DConditionModel
+
+
+UNET_NUM_BLOCKS_FOR_BLOCK_LR = 23
+
+
+def get_block_params_to_optimize(unet: SdxlUNet2DConditionModel, block_lrs: List[float]) -> List[dict]:
+    block_params = [[] for _ in range(len(block_lrs))]
+
+    for i, (name, param) in enumerate(unet.named_parameters()):
+        if name.startswith("time_embed.") or name.startswith("label_emb."):
+            block_index = 0  # 0
+        elif name.startswith("input_blocks."):  # 1-9
+            block_index = 1 + int(name.split(".")[1])
+        elif name.startswith("middle_block."):  # 10-12
+            block_index = 10 + int(name.split(".")[1])
+        elif name.startswith("output_blocks."):  # 13-21
+            block_index = 13 + int(name.split(".")[1])
+        elif name.startswith("out."):  # 22
+            block_index = 22
+        else:
+            raise ValueError(f"unexpected parameter name: {name}")
+
+        block_params[block_index].append(param)
+
+    params_to_optimize = []
+    for i, params in enumerate(block_params):
+        if block_lrs[i] == 0:  # 0のときは学習しない do not optimize when lr is 0
+            continue
+        params_to_optimize.append({"params": params, "lr": block_lrs[i]})
+
+    return params_to_optimize
+
+
+def append_block_lr_to_logs(block_lrs, logs, lr_scheduler, optimizer_type):
+    names = []
+    block_index = 0
+    while block_index < UNET_NUM_BLOCKS_FOR_BLOCK_LR + 2:
+        if block_index < UNET_NUM_BLOCKS_FOR_BLOCK_LR:
+            if block_lrs[block_index] == 0:
+                block_index += 1
+                continue
+            names.append(f"block{block_index}")
+        elif block_index == UNET_NUM_BLOCKS_FOR_BLOCK_LR:
+            names.append("text_encoder1")
+        elif block_index == UNET_NUM_BLOCKS_FOR_BLOCK_LR + 1:
+            names.append("text_encoder2")
+
+        block_index += 1
+
+    train_util.append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names)
 
 
 def train(args):
@@ -39,6 +101,14 @@ def train(args):
     assert (
         not args.train_text_encoder or not args.cache_text_encoder_outputs
     ), "cache_text_encoder_outputs is not supported when training text encoder / text encoderを学習するときはcache_text_encoder_outputsはサポートされていません"
+
+    if args.block_lr:
+        block_lrs = [float(lr) for lr in args.block_lr.split(",")]
+        assert (
+            len(block_lrs) == UNET_NUM_BLOCKS_FOR_BLOCK_LR
+        ), f"block_lr must have {UNET_NUM_BLOCKS_FOR_BLOCK_LR} values / block_lrは{UNET_NUM_BLOCKS_FOR_BLOCK_LR}個の値を指定してください"
+    else:
+        block_lrs = None
 
     cache_latents = args.cache_latents
     use_dreambooth_method = args.in_json is None
@@ -95,8 +165,10 @@ def train(args):
 
     current_epoch = Value("i", 0)
     current_step = Value("i", 0)
-    ds_for_collater = train_dataset_group if args.max_data_loader_n_workers == 0 else None
-    collater = train_util.collater_class(current_epoch, current_step, ds_for_collater)
+    ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
+    collator = train_util.collator_class(current_epoch, current_step, ds_for_collator)
+
+    train_dataset_group.verify_bucket_reso_steps(32)
 
     if args.debug_dataset:
         train_util.debug_dataset(train_dataset_group, True)
@@ -192,10 +264,11 @@ def train(args):
         accelerator.wait_for_everyone()
 
     # 学習を準備する：モデルを適切な状態にする
-    training_models = []
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-    training_models.append(unet)
+    train_unet = args.learning_rate > 0
+    train_text_encoder1 = False
+    train_text_encoder2 = False
 
     if args.train_text_encoder:
         # TODO each option for two text encoders?
@@ -203,10 +276,23 @@ def train(args):
         if args.gradient_checkpointing:
             text_encoder1.gradient_checkpointing_enable()
             text_encoder2.gradient_checkpointing_enable()
-        training_models.append(text_encoder1)
-        training_models.append(text_encoder2)
-        # set require_grad=True later
+        lr_te1 = args.learning_rate_te1 if args.learning_rate_te1 is not None else args.learning_rate  # 0 means not train
+        lr_te2 = args.learning_rate_te2 if args.learning_rate_te2 is not None else args.learning_rate  # 0 means not train
+        train_text_encoder1 = lr_te1 > 0
+        train_text_encoder2 = lr_te2 > 0
+
+        # caching one text encoder output is not supported
+        if not train_text_encoder1:
+            text_encoder1.to(weight_dtype)
+        if not train_text_encoder2:
+            text_encoder2.to(weight_dtype)
+        text_encoder1.requires_grad_(train_text_encoder1)
+        text_encoder2.requires_grad_(train_text_encoder2)
+        text_encoder1.train(train_text_encoder1)
+        text_encoder2.train(train_text_encoder2)
     else:
+        text_encoder1.to(weight_dtype)
+        text_encoder2.to(weight_dtype)
         text_encoder1.requires_grad_(False)
         text_encoder2.requires_grad_(False)
         text_encoder1.eval()
@@ -215,7 +301,7 @@ def train(args):
         # TextEncoderの出力をキャッシュする
         if args.cache_text_encoder_outputs:
             # Text Encodes are eval and no grad
-            with torch.no_grad():
+            with torch.no_grad(), accelerator.autocast():
                 train_dataset_group.cache_text_encoder_outputs(
                     (tokenizer1, tokenizer2),
                     (text_encoder1, text_encoder2),
@@ -231,17 +317,33 @@ def train(args):
         vae.eval()
         vae.to(accelerator.device, dtype=vae_dtype)
 
-    for m in training_models:
-        m.requires_grad_(True)
-    params = []
-    for m in training_models:
-        params.extend(m.parameters())
-    params_to_optimize = params
+    unet.requires_grad_(train_unet)
+    if not train_unet:
+        unet.to(accelerator.device, dtype=weight_dtype)  # because of unet is not prepared
+
+    training_models = []
+    params_to_optimize = []
+    if train_unet:
+        training_models.append(unet)
+        if block_lrs is None:
+            params_to_optimize.append({"params": list(unet.parameters()), "lr": args.learning_rate})
+        else:
+            params_to_optimize.extend(get_block_params_to_optimize(unet, block_lrs))
+
+    if train_text_encoder1:
+        training_models.append(text_encoder1)
+        params_to_optimize.append({"params": list(text_encoder1.parameters()), "lr": args.learning_rate_te1 or args.learning_rate})
+    if train_text_encoder2:
+        training_models.append(text_encoder2)
+        params_to_optimize.append({"params": list(text_encoder2.parameters()), "lr": args.learning_rate_te2 or args.learning_rate})
 
     # calculate number of trainable parameters
     n_params = 0
-    for p in params:
-        n_params += p.numel()
+    for params in params_to_optimize:
+        for p in params["params"]:
+            n_params += p.numel()
+
+    accelerator.print(f"train unet: {train_unet}, text_encoder1: {train_text_encoder1}, text_encoder2: {train_text_encoder2}")
     accelerator.print(f"number of models: {len(training_models)}")
     accelerator.print(f"number of trainable parameters: {n_params}")
 
@@ -256,7 +358,7 @@ def train(args):
         train_dataset_group,
         batch_size=1,
         shuffle=True,
-        collate_fn=collater,
+        collate_fn=collator,
         num_workers=n_workers,
         persistent_workers=args.persistent_data_loader_workers,
     )
@@ -293,18 +395,17 @@ def train(args):
         text_encoder2.to(weight_dtype)
 
     # acceleratorがなんかよろしくやってくれるらしい
-    if args.train_text_encoder:
-        unet, text_encoder1, text_encoder2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, text_encoder1, text_encoder2, optimizer, train_dataloader, lr_scheduler
-        )
-
-        # transform DDP after prepare
-        text_encoder1, text_encoder2, unet = train_util.transform_models_if_DDP([text_encoder1, text_encoder2, unet])
-    else:
-        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, optimizer, train_dataloader, lr_scheduler)
+    if train_unet:
+        unet = accelerator.prepare(unet)
         (unet,) = train_util.transform_models_if_DDP([unet])
-        text_encoder1.to(weight_dtype)
-        text_encoder2.to(weight_dtype)
+    if train_text_encoder1:
+        text_encoder1 = accelerator.prepare(text_encoder1)
+        (text_encoder1,) = train_util.transform_models_if_DDP([text_encoder1])
+    if train_text_encoder2:
+        text_encoder2 = accelerator.prepare(text_encoder2)
+        (text_encoder2,) = train_util.transform_models_if_DDP([text_encoder2])
+
+    optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
 
     # TextEncoderの出力をキャッシュするときにはCPUへ移動する
     if args.cache_text_encoder_outputs:
@@ -360,7 +461,7 @@ def train(args):
             init_kwargs = toml.load(args.log_tracker_config)
         accelerator.init_trackers("finetuning" if args.log_tracker_name is None else args.log_tracker_name, init_kwargs=init_kwargs)
 
-    loss_total = 0
+    loss_recorder = train_util.LossRecorder()
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
@@ -368,10 +469,9 @@ def train(args):
         for m in training_models:
             m.train()
 
-        
         for step, batch in enumerate(train_dataloader):
             current_step.value = global_step
-            with accelerator.accumulate(training_models[0]):  # 複数モデルに対応していない模様だがとりあえずこうしておく
+            with accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
                     latents = batch["latents"].to(accelerator.device).to(dtype=weight_dtype)
                 else:
@@ -457,7 +557,12 @@ def train(args):
 
                 target = noise
 
-                if args.min_snr_gamma or args.scale_v_pred_loss_like_noise_pred or args.v_pred_like_loss:
+                if (
+                    args.min_snr_gamma
+                    or args.scale_v_pred_loss_like_noise_pred
+                    or args.v_pred_like_loss
+                    or args.debiased_estimation_loss
+                ):
                     # do not mean over batch dimension for snr weight or scale v-pred loss
                     loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     loss = loss.mean([1, 2, 3])
@@ -468,6 +573,8 @@ def train(args):
                         loss = scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
                     if args.v_pred_like_loss:
                         loss = add_v_prediction_like_loss(loss, timesteps, noise_scheduler, args.v_pred_like_loss)
+                    if args.debiased_estimation_loss:
+                        loss = apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
                     loss = loss.mean()  # mean over batch dimension
                 else:
@@ -526,27 +633,25 @@ def train(args):
                         )
 
             current_loss = loss.detach().item()  # 平均なのでbatch sizeは関係ないはず
-             # TODO moving averageにする
-            loss_total += current_loss
-            avr_loss = loss_total / global_step
-            logs = {"loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
             if args.logging_dir is not None:
-                logs = {"loss": current_loss, "lr": float(lr_scheduler.get_last_lr()[0]), "loss/average":avr_loss}
-                if (
-                    args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower() == "Prodigy"
-                ):  # tracking d*lr value
-                    logs["lr/d*lr"] = (
-                        lr_scheduler.optimizers[0].param_groups[0]["d"] * lr_scheduler.optimizers[0].param_groups[0]["lr"]
-                    )
+                logs = {"loss": current_loss}
+                if block_lrs is None:
+                    train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
+                else:
+                    append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
+
                 accelerator.log(logs, step=global_step)
 
-            
+            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+            avr_loss: float = loss_recorder.moving_average
+            logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
+
             if global_step >= args.max_train_steps:
                 break
 
         if args.logging_dir is not None:
-            logs = {"loss/epoch": loss_total / len(train_dataloader)}
+            logs = {"loss/epoch": loss_recorder.moving_average}
             accelerator.log(logs, step=epoch + 1)
 
         accelerator.wait_for_everyone()
@@ -630,12 +735,32 @@ def setup_parser() -> argparse.ArgumentParser:
     custom_train_functions.add_custom_train_arguments(parser)
     sdxl_train_util.add_sdxl_training_arguments(parser)
 
+    parser.add_argument(
+        "--learning_rate_te1",
+        type=float,
+        default=None,
+        help="learning rate for text encoder 1 (ViT-L) / text encoder 1 (ViT-L)の学習率",
+    )
+    parser.add_argument(
+        "--learning_rate_te2",
+        type=float,
+        default=None,
+        help="learning rate for text encoder 2 (BiG-G) / text encoder 2 (BiG-G)の学習率",
+    )
+
     parser.add_argument("--diffusers_xformers", action="store_true", help="use xformers by diffusers / Diffusersでxformersを使用する")
     parser.add_argument("--train_text_encoder", action="store_true", help="train text encoder / text encoderも学習する")
     parser.add_argument(
         "--no_half_vae",
         action="store_true",
         help="do not use fp16/bf16 VAE in mixed precision (use float VAE) / mixed precisionでも fp16/bf16 VAEを使わずfloat VAEを使う",
+    )
+    parser.add_argument(
+        "--block_lr",
+        type=str,
+        default=None,
+        help=f"learning rates for each block of U-Net, comma-separated, {UNET_NUM_BLOCKS_FOR_BLOCK_LR} values / "
+        + f"U-Netの各ブロックの学習率、カンマ区切り、{UNET_NUM_BLOCKS_FOR_BLOCK_LR}個の値",
     )
 
     return parser

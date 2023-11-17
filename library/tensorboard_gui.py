@@ -12,35 +12,56 @@ log = setup_logging()
 tensorboard_proc = None
 TENSORBOARD = 'tensorboard' if os.name == 'posix' else 'tensorboard.exe'
 
-def start_tensorboard(logging_dir, wait_time=5):
+# Set the default tensorboard port
+DEFAULT_TENSORBOARD_PORT = 6006
+
+def start_tensorboard(headless, logging_dir, wait_time=5):
     global tensorboard_proc
+    
+    headless_bool = True if headless.get('label') == 'True' else False
+
+    # Read the TENSORBOARD_PORT from the environment, or use the default
+    tensorboard_port = os.environ.get('TENSORBOARD_PORT', DEFAULT_TENSORBOARD_PORT)
 
     if not os.listdir(logging_dir):
         log.info('Error: log folder is empty')
         msgbox(msg='Error: log folder is empty')
         return
 
-    run_cmd = [TENSORBOARD, '--logdir', logging_dir, '--host', '0.0.0.0', '--port', '6006']
+    run_cmd = [
+        TENSORBOARD,
+        '--logdir',
+        logging_dir,
+        '--host',
+        '0.0.0.0',
+        '--port',
+        str(tensorboard_port),
+    ]
 
     log.info(run_cmd)
     if tensorboard_proc is not None:
-        log.info('Tensorboard is already running. Terminating existing process before starting new one...')
+        log.info(
+            'Tensorboard is already running. Terminating existing process before starting new one...'
+        )
         stop_tensorboard()
 
     # Start background process
-    log.info('Starting tensorboard...')
+    log.info('Starting TensorBoard on port {}'.format(tensorboard_port))
     try:
         tensorboard_proc = subprocess.Popen(run_cmd)
     except Exception as e:
         log.error('Failed to start Tensorboard:', e)
         return
 
-    # Wait for some time to allow TensorBoard to start up
-    time.sleep(wait_time)
+    if not headless_bool:
+        # Wait for some time to allow TensorBoard to start up
+        time.sleep(wait_time)
 
-    # Open the TensorBoard URL in the default browser
-    log.info('Opening tensorboard url in browser...')
-    webbrowser.open('http://localhost:6006')
+        # Open the TensorBoard URL in the default browser
+        tensorboard_url = f'http://localhost:{tensorboard_port}'
+        log.info(f'Opening TensorBoard URL in browser: {tensorboard_url}')
+        webbrowser.open(tensorboard_url)
+
 
 def stop_tensorboard():
     global tensorboard_proc
@@ -54,6 +75,7 @@ def stop_tensorboard():
             log.error('Failed to stop Tensorboard:', e)
     else:
         log.info('Tensorboard is not running...')
+
 
 def gradio_tensorboard():
     with gr.Row():
