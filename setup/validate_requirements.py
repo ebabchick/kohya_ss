@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import shutil
 import argparse
@@ -16,7 +15,7 @@ if "setup" in project_directory:
 # Add the project directory to the beginning of the Python search path
 sys.path.insert(0, project_directory)
 
-from library.custom_logging import setup_logging
+from kohya_gui.custom_logging import setup_logging
 
 # Set up logging
 log = setup_logging()
@@ -88,8 +87,7 @@ def check_torch():
     except Exception as e:
         log.error(f'Could not load torch: {e}')
         sys.exit(1)
-
-
+        
 def main():
     setup_common.check_repo_version()
     # Parse command line arguments
@@ -104,8 +102,13 @@ def main():
     )
     parser.add_argument('--debug', action='store_true', help='Debug on')
     args = parser.parse_args()
+    
+    setup_common.update_submodule()
 
     torch_ver = check_torch()
+    
+    if not setup_common.check_python_version():
+        exit(1)
     
     if args.requirements:
         setup_common.install_requirements(args.requirements, check_no_verify_flag=True)

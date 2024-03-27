@@ -2,16 +2,132 @@ import subprocess
 import os
 import re
 import sys
-import filecmp
 import logging
 import shutil
-import sysconfig
 import datetime
-import platform
 import pkg_resources
 
 errors = 0  # Define the 'errors' variable before using it
 log = logging.getLogger('sd')
+
+def check_python_version():
+    """
+    Check if the current Python version is >= 3.10.9 and < 3.11.0
+    
+    Returns:
+    bool: True if the current Python version is valid, False otherwise.
+    """
+    min_version = (3, 10, 9)
+    max_version = (3, 11, 0)
+    
+    from packaging import version
+    
+    try:
+        current_version = sys.version_info
+        log.info(f"Python version is {sys.version}")
+        
+        if not (min_version <= current_version < max_version):
+            log.error("The current version of python is not appropriate to run Kohya_ss GUI")
+            log.error("The python version needs to be greater or equal to 3.10.9 and less than 3.11.0")
+            return False
+        return True
+    except Exception as e:
+        log.error(f"Failed to verify Python version. Error: {e}")
+        return False
+
+def update_submodule():
+    """
+    Ensure the submodule is initialized and updated.
+    """
+    try:
+        # Initialize and update the submodule
+        subprocess.run(["git", "submodule", "update", "--init", "--recursive", "--quiet"], check=True)
+        log.info("Submodule initialized and updated.")
+        
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error during Git operation: {e}")
+    except FileNotFoundError as e:
+        log.error(e)
+
+def read_tag_version_from_file(file_path):
+    """
+    Read the tag version from a given file.
+
+    Parameters:
+    - file_path: The path to the file containing the tag version.
+
+    Returns:
+    The tag version as a string.
+    """
+    with open(file_path, 'r') as file:
+        # Read the first line and strip whitespace
+        tag_version = file.readline().strip()
+    return tag_version
+
+def clone_or_checkout(repo_url, branch_or_tag, directory_name):
+    """
+    Clone a repo or checkout a specific branch or tag if the repo already exists.
+    For branches, it updates to the latest version before checking out.
+    Suppresses detached HEAD advice for tags or specific commits.
+    Restores the original working directory after operations.
+
+    Parameters:
+    - repo_url: The URL of the Git repository.
+    - branch_or_tag: The name of the branch or tag to clone or checkout.
+    - directory_name: The name of the directory to clone into or where the repo already exists.
+    """
+    original_dir = os.getcwd()  # Store the original directory
+    try:
+        if not os.path.exists(directory_name):
+            # Directory does not exist, clone the repo quietly
+            
+            # Construct the command as a string for logging
+            # run_cmd = f"git clone --branch {branch_or_tag} --single-branch --quiet {repo_url} {directory_name}"
+            run_cmd = ["git", "clone", "--branch", branch_or_tag, "--single-branch", "--quiet", repo_url, directory_name]
+
+
+            # Log the command
+            log.debug(run_cmd)
+            
+            # Run the command
+            process = subprocess.Popen(
+                run_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            output, error = process.communicate()
+            
+            if error and not error.startswith("Note: switching to"):
+                log.warning(error)
+            else:
+                log.info(f"Successfully cloned sd-scripts {branch_or_tag}")
+            
+        else:
+            os.chdir(directory_name)
+            subprocess.run(["git", "fetch", "--all", "--quiet"], check=True)
+            subprocess.run(["git", "config", "advice.detachedHead", "false"], check=True)
+            
+            # Get the current branch or commit hash
+            current_branch_hash = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode()
+            tag_branch_hash = subprocess.check_output(["git", "rev-parse", branch_or_tag]).strip().decode()
+            
+            if current_branch_hash != tag_branch_hash:
+                run_cmd = f"git checkout {branch_or_tag} --quiet"
+                # Log the command
+                log.debug(run_cmd)
+                
+                # Execute the checkout command
+                process = subprocess.Popen(run_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                output, error = process.communicate()
+                
+                if error:
+                    log.warning(error.decode())
+                else:
+                    log.info(f"Checked out sd-scripts {branch_or_tag} successfully.")
+            else:
+                log.info(f"Current branch of sd-scripts is already at the required release {branch_or_tag}.")
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error during Git operation: {e}")
+    finally:
+        os.chdir(original_dir)  # Restore the original directory
 
 # setup console and file logging
 def setup_logging(clean=False):
@@ -258,7 +374,7 @@ def check_repo_version(): # pylint: disable=unused-argument
         with open(os.path.join('./.release'), 'r', encoding='utf8') as file:
             release= file.read()
         
-        log.info(f'Version: {release}')
+        log.info(f'Kohya_ss GUI version: {release}')
     else:
         log.debug('Could not read release...')
     
@@ -303,30 +419,52 @@ def pip(arg: str, ignore: bool = False, quiet: bool = False, show_stdout: bool =
             log.debug(f'Pip output: {txt}')
         return txt
 
-
 def installed(package, friendly: str = None):
-    #
-    # This function was adapted from code written by vladimandic: https://github.com/vladmandic/automatic/commits/master
-    #
+    """
+    Checks if the specified package(s) are installed with the correct version.
+    This function can handle package specifications with or without version constraints,
+    and can also filter out command-line options and URLs when a 'friendly' string is provided.
     
-    # Remove brackets and their contents from the line using regular expressions
-    # e.g., diffusers[torch]==0.10.2 becomes diffusers==0.10.2
+    Parameters:
+    - package: A string that specifies one or more packages with optional version constraints.
+    - friendly: An optional string used to provide a cleaner version of the package string
+                that excludes command-line options and URLs.
+
+    Returns:
+    - True if all specified packages are installed with the correct versions, False otherwise.
+    
+    Note:
+    This function was adapted from code written by vladimandic.
+    """
+    
+    # Remove any optional features specified in brackets (e.g., "package[option]==version" becomes "package==version")
     package = re.sub(r'\[.*?\]', '', package)
 
     try:
         if friendly:
+            # If a 'friendly' version of the package string is provided, split it into components
             pkgs = friendly.split()
+            
+            # Filter out command-line options and URLs from the package specification
+            pkgs = [
+                p
+                for p in package.split()
+                if not p.startswith('--') and "://" not in p
+            ]
         else:
+            # Split the package string into components, excluding '-' and '=' prefixed items
             pkgs = [
                 p
                 for p in package.split()
                 if not p.startswith('-') and not p.startswith('=')
             ]
+            # For each package component, extract the package name, excluding any URLs
             pkgs = [
                 p.split('/')[-1] for p in pkgs
-            ]   # get only package name if installing from URL
-        
+            ]
+
         for pkg in pkgs:
+            # Parse the package name and version based on the version specifier used
             if '>=' in pkg:
                 pkg_name, pkg_version = [x.strip() for x in pkg.split('>=')]
             elif '==' in pkg:
@@ -334,33 +472,43 @@ def installed(package, friendly: str = None):
             else:
                 pkg_name, pkg_version = pkg.strip(), None
 
+            # Attempt to find the installed package by its name
             spec = pkg_resources.working_set.by_key.get(pkg_name, None)
             if spec is None:
+                # Try again with lowercase name
                 spec = pkg_resources.working_set.by_key.get(pkg_name.lower(), None)
             if spec is None:
+                # Try replacing underscores with dashes
                 spec = pkg_resources.working_set.by_key.get(pkg_name.replace('_', '-'), None)
 
             if spec is not None:
+                # Package is found, check version
                 version = pkg_resources.get_distribution(pkg_name).version
                 log.debug(f'Package version found: {pkg_name} {version}')
 
                 if pkg_version is not None:
+                    # Verify if the installed version meets the specified constraints
                     if '>=' in pkg:
                         ok = version >= pkg_version
                     else:
                         ok = version == pkg_version
 
                     if not ok:
+                        # Version mismatch, log warning and return False
                         log.warning(f'Package wrong version: {pkg_name} {version} required {pkg_version}')
                         return False
             else:
+                # Package not found, log debug message and return False
                 log.debug(f'Package version not found: {pkg_name}')
                 return False
 
+        # All specified packages are installed with the correct versions
         return True
     except ModuleNotFoundError:
+        # One or more packages are not installed, log debug message and return False
         log.debug(f'Package not installed: {pkgs}')
         return False
+
 
 
 # install package using pip if not already installed
@@ -382,7 +530,6 @@ def install(
         quick_allowed = False
     if reinstall or not installed(package, friendly):
         pip(f'install --upgrade {package}', ignore=ignore, show_stdout=show_stdout)
-
 
 
 def process_requirements_line(line, show_stdout: bool = False):
@@ -434,42 +581,19 @@ def ensure_base_requirements():
         import rich   # pylint: disable=unused-import
     except ImportError:
         install('--upgrade rich', 'rich')
+        
+    try:
+        import packaging
+    except ImportError:
+        install('packaging')
 
 
 def run_cmd(run_cmd):
     try:
         subprocess.run(run_cmd, shell=True, check=False, env=os.environ)
     except subprocess.CalledProcessError as e:
-        print(f'Error occurred while running command: {run_cmd}')
-        print(f'Error: {e}')
-
-
-# check python version
-def check_python(ignore=True, skip_git=False):
-    #
-    # This function was adapted from code written by vladimandic: https://github.com/vladmandic/automatic/commits/master
-    #
-
-    supported_minors = [9, 10]
-    log.info(f'Python {platform.python_version()} on {platform.system()}')
-    if not (
-        int(sys.version_info.major) == 3
-        and int(sys.version_info.minor) in supported_minors
-    ):
-        log.error(
-            f'Incompatible Python version: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} required 3.{supported_minors}'
-        )
-        if not ignore:
-            sys.exit(1)
-    if not skip_git:
-        git_cmd = os.environ.get('GIT', 'git')
-        if shutil.which(git_cmd) is None:
-            log.error('Git not found')
-            if not ignore:
-                sys.exit(1)
-    else:
-        git_version = git('--version', folder=None, ignore=False)
-        log.debug(f'Git {git_version.replace("git version", "").strip()}')
+        log.error(f'Error occurred while running command: {run_cmd}')
+        log.error(f'Error: {e}')
 
 
 def delete_file(file_path):

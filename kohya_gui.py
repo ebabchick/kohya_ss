@@ -1,16 +1,16 @@
 import gradio as gr
 import os
 import argparse
+from kohya_gui.class_gui_config import KohyaSSGUIConfig
 from dreambooth_gui import dreambooth_tab
 from finetune_gui import finetune_tab
 from textual_inversion_gui import ti_tab
-from library.utilities import utilities_tab
+from kohya_gui.utilities import utilities_tab
 from lora_gui import lora_tab
-from library.class_lora_tab import LoRATools
+from kohya_gui.class_lora_tab import LoRATools
 
-import os
-from library.custom_logging import setup_logging
-from library.localization_ext import add_javascript
+from kohya_gui.custom_logging import setup_logging
+from kohya_gui.localization_ext import add_javascript
 
 # Set up logging
 log = setup_logging()
@@ -25,7 +25,7 @@ def UI(**kwargs):
 
     if os.path.exists("./style.css"):
         with open(os.path.join("./style.css"), "r", encoding="utf8") as file:
-            log.info("Load CSS...")
+            log.debug("Load CSS...")
             css += file.read() + "\n"
 
     if os.path.exists("./.release"):
@@ -39,6 +39,8 @@ def UI(**kwargs):
     interface = gr.Blocks(
         css=css, title=f"Kohya_ss GUI {release}", theme=gr.themes.Default()
     )
+    
+    config = KohyaSSGUIConfig()
 
     with interface:
         with gr.Tab("Dreambooth"):
@@ -47,13 +49,13 @@ def UI(**kwargs):
                 reg_data_dir_input,
                 output_dir_input,
                 logging_dir_input,
-            ) = dreambooth_tab(headless=headless)
+            ) = dreambooth_tab(headless=headless, config=config)
         with gr.Tab("LoRA"):
-            lora_tab(headless=headless)
+            lora_tab(headless=headless, config=config)
         with gr.Tab("Textual Inversion"):
-            ti_tab(headless=headless)
+            ti_tab(headless=headless, config=config)
         with gr.Tab("Finetuning"):
-            finetune_tab(headless=headless)
+            finetune_tab(headless=headless, config=config)
         with gr.Tab("Utilities"):
             utilities_tab(
                 train_data_dir_input=train_data_dir_input,
@@ -96,6 +98,7 @@ def UI(**kwargs):
         launch_kwargs["inbrowser"] = inbrowser
     if share:
         launch_kwargs["share"] = share
+    launch_kwargs["debug"] = True
     interface.launch(**launch_kwargs)
 
 

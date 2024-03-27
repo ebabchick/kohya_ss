@@ -1,9 +1,10 @@
 #open_folder_small{
-    height: auto;
     min-width: auto;
     flex-grow: 0;
     padding-left: 0.25em;
     padding-right: 0.25em;
+    padding: 0.5em;
+    font-size: 1.5em;
 }
 
 #open_folder{

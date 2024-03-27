@@ -10,6 +10,19 @@ env_var_exists() {
   fi
 }
 
+# Define the directory path for WSL2
+lib_path="/usr/lib/wsl/lib/"
+
+# Check if the directory exists
+if [ -d "$lib_path" ]; then
+    # Check if LD_LIBRARY_PATH is already set
+    if [ -z "${LD_LIBRARY_PATH}" ]; then
+        # LD_LIBRARY_PATH is not set, set it to the lib_path
+        export LD_LIBRARY_PATH="$lib_path"
+        # echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH"
+    fi
+fi
+
 # Need RUNPOD to have a default value before first access
 RUNPOD=false
 if env_var_exists RUNPOD_POD_ID || env_var_exists RUNPOD_API_KEY; then
@@ -72,14 +85,8 @@ fi
 #Set OneAPI if it's not set by the user
 if [[ "$@" == *"--use-ipex"* ]]
 then
-    echo "Setting OneAPI environment"
-    if [ ! -x "$(command -v sycl-ls)" ]
-    then
-        if [[ -z "$ONEAPI_ROOT" ]]
-        then
-            ONEAPI_ROOT=/opt/intel/oneapi
-        fi
-        source $ONEAPI_ROOT/setvars.sh
+    if [ -d "$SCRIPT_DIR/venv" ] && [[ -z "${DISABLE_VENV_LIBS}" ]]; then
+        export LD_LIBRARY_PATH=$(realpath "$SCRIPT_DIR/venv")/lib/:$LD_LIBRARY_PATH
     fi
     export NEOReadDebugKeys=1
     export ClDeviceGlobalMemSizeAvailablePercent=100
@@ -88,7 +95,7 @@ then
         STARTUP_CMD=ipexrun
         if [[ -z "$STARTUP_CMD_ARGS" ]]
         then
-            STARTUP_CMD_ARGS="--multi-task-manager taskset --memory-allocator jemalloc"
+            STARTUP_CMD_ARGS="--multi-task-manager taskset --memory-allocator tcmalloc"
         fi
     fi
 fi
@@ -102,4 +109,7 @@ fi
 # Validate the requirements and run the script if successful
 if python "$SCRIPT_DIR/setup/validate_requirements.py" -r "$REQUIREMENTS_FILE"; then
     "${STARTUP_CMD}" $STARTUP_CMD_ARGS "$SCRIPT_DIR/kohya_gui.py" "$@"
+else
+    echo "Validation failed. Exiting..."
+    exit 1
 fi
