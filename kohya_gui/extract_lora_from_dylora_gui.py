@@ -4,7 +4,6 @@ import subprocess
 import os
 import sys
 from .common_gui import (
-    get_saveasfilename_path,
     get_file_path,
     scriptdir,
     list_files,
@@ -16,10 +15,10 @@ from .custom_logging import setup_logging
 # Set up logging
 log = setup_logging()
 
-folder_symbol = '\U0001f4c2'  # 📂
-refresh_symbol = '\U0001f504'  # 🔄
-save_style_symbol = '\U0001f4be'  # 💾
-document_symbol = '\U0001F4C4'   # 📄
+folder_symbol = "\U0001f4c2"  # 📂
+refresh_symbol = "\U0001f504"  # 🔄
+save_style_symbol = "\U0001f4be"  # 💾
+document_symbol = "\U0001F4C4"  # 📄
 
 PYTHON = sys.executable
 
@@ -28,15 +27,16 @@ def extract_dylora(
     model,
     save_to,
     unit,
+    use_shell: bool = False,
 ):
     # Check for caption_text_input
-    if model == '':
-        msgbox('Invalid DyLoRA model file')
+    if model == "":
+        msgbox("Invalid DyLoRA model file")
         return
 
     # Check if source model exist
     if not os.path.isfile(model):
-        msgbox('The provided DyLoRA model is not a file')
+        msgbox("The provided DyLoRA model is not a file")
         return
 
     if os.path.dirname(save_to) == "":
@@ -50,22 +50,32 @@ def extract_dylora(
         path, ext = os.path.splitext(save_to)
         save_to = f"{path}_tmp{ext}"
 
-    run_cmd = (
-        fr'"{PYTHON}" "{scriptdir}/sd-scripts/networks/extract_lora_from_dylora.py"'
-    )
-    run_cmd += fr' --save_to "{save_to}"'
-    run_cmd += fr' --model "{model}"'
-    run_cmd += f' --unit {unit}'
-
-    log.info(run_cmd)
+    run_cmd = [
+        fr'"{PYTHON}"',
+        rf'"{scriptdir}/sd-scripts/networks/extract_lora_from_dylora.py"',
+        "--save_to",
+        rf'"{save_to}"',
+        "--model",
+        rf'"{model}"',
+        "--unit",
+        str(unit),
+    ]
 
     env = os.environ.copy()
-    env['PYTHONPATH'] = fr"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = (
+        f"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    )
+    # Example environment variable adjustment for the Python environment
+    env["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-    # Run the command
-    subprocess.run(run_cmd, shell=True, env=env)
+    # Reconstruct the safe command string for display
+    command_to_run = " ".join(run_cmd)
+    log.info(f"Executing command: {command_to_run} with shell={use_shell}")
 
-    log.info('Done extracting DyLoRA...')
+    # Run the command in the sd-scripts folder context
+    subprocess.run(command_to_run, env=env, shell=use_shell)
+
+    log.info("Done extracting DyLoRA...")
 
 
 ###
@@ -73,16 +83,14 @@ def extract_dylora(
 ###
 
 
-def gradio_extract_dylora_tab(headless=False):
+def gradio_extract_dylora_tab(headless=False, use_shell: bool = False):
     current_model_dir = os.path.join(scriptdir, "outputs")
     current_save_dir = os.path.join(scriptdir, "outputs")
 
-    with gr.Tab('Extract DyLoRA'):
-        gr.Markdown(
-            'This utility can extract a DyLoRA network from a finetuned model.'
-        )
-        lora_ext = gr.Textbox(value='*.safetensors *.pt', visible=False)
-        lora_ext_name = gr.Textbox(value='LoRA model types', visible=False)
+    with gr.Tab("Extract DyLoRA"):
+        gr.Markdown("This utility can extract a DyLoRA network from a finetuned model.")
+        lora_ext = gr.Textbox(value="*.safetensors *.pt", visible=False)
+        lora_ext_name = gr.Textbox(value="LoRA model types", visible=False)
 
         def list_models(path):
             nonlocal current_model_dir
@@ -96,17 +104,22 @@ def gradio_extract_dylora_tab(headless=False):
 
         with gr.Group(), gr.Row():
             model = gr.Dropdown(
-                label='DyLoRA model (path to the DyLoRA model to extract from)',
+                label="DyLoRA model (path to the DyLoRA model to extract from)",
                 interactive=True,
                 choices=[""] + list_models(current_model_dir),
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(model, lambda: None, lambda: {"choices": list_models(current_model_dir)}, "open_folder_small")
+            create_refresh_button(
+                model,
+                lambda: None,
+                lambda: {"choices": list_models(current_model_dir)},
+                "open_folder_small",
+            )
             button_model_file = gr.Button(
                 folder_symbol,
-                elem_id='open_folder_small',
-                elem_classes=['tool'],
+                elem_id="open_folder_small",
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_model_file.click(
@@ -117,17 +130,22 @@ def gradio_extract_dylora_tab(headless=False):
             )
 
             save_to = gr.Dropdown(
-                label='Save to (path where to save the extracted LoRA model...)',
+                label="Save to (path where to save the extracted LoRA model...)",
                 interactive=True,
                 choices=[""] + list_save_to(current_save_dir),
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(save_to, lambda: None, lambda: {"choices": list_save_to(current_save_dir)}, "open_folder_small")
+            create_refresh_button(
+                save_to,
+                lambda: None,
+                lambda: {"choices": list_save_to(current_save_dir)},
+                "open_folder_small",
+            )
             unit = gr.Slider(
                 minimum=1,
                 maximum=256,
-                label='Network Dimension (Rank)',
+                label="Network Dimension (Rank)",
                 value=1,
                 step=1,
                 interactive=True,
@@ -146,7 +164,7 @@ def gradio_extract_dylora_tab(headless=False):
                 show_progress=False,
             )
 
-        extract_button = gr.Button('Extract LoRA model')
+        extract_button = gr.Button("Extract LoRA model")
 
         extract_button.click(
             extract_dylora,
@@ -154,6 +172,7 @@ def gradio_extract_dylora_tab(headless=False):
                 model,
                 save_to,
                 unit,
+                gr.Checkbox(value=use_shell, visible=False),
             ],
             show_progress=False,
         )

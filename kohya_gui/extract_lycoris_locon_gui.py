@@ -5,7 +5,6 @@ import os
 import sys
 from .common_gui import (
     get_saveasfilename_path,
-    get_any_file_path,
     get_file_path,
     scriptdir,
     list_files,
@@ -44,6 +43,7 @@ def extract_lycoris_locon(
     use_sparse_bias,
     sparsity,
     disable_cp,
+    use_shell: bool = False,
 ):
     # Check for caption_text_input
     if db_model == "":
@@ -74,44 +74,73 @@ def extract_lycoris_locon(
         path, ext = os.path.splitext(output_name)
         output_name = f"{path}_tmp{ext}"
 
-    run_cmd = fr'"{PYTHON}" "{scriptdir}/tools/lycoris_locon_extract.py"'
-    if is_sdxl:
-        run_cmd += f" --is_sdxl"
-    if is_v2:
-        run_cmd += f" --is_v2"
-    run_cmd += f" --device {device}"
-    run_cmd += f" --mode {mode}"
-    run_cmd += f" --safetensors"
-    if mode == "fixed":
-        run_cmd += f" --linear_dim {linear_dim}"
-        run_cmd += f" --conv_dim {conv_dim}"
-    if mode == "threshold":
-        run_cmd += f" --linear_threshold {linear_threshold}"
-        run_cmd += f" --conv_threshold {conv_threshold}"
-    if mode == "ratio":
-        run_cmd += f" --linear_ratio {linear_ratio}"
-        run_cmd += f" --conv_ratio {conv_ratio}"
-    if mode == "quantile":
-        run_cmd += f" --linear_quantile {linear_quantile}"
-        run_cmd += f" --conv_quantile {conv_quantile}"
-    if use_sparse_bias:
-        run_cmd += f" --use_sparse_bias"
-    run_cmd += f" --sparsity {sparsity}"
-    if disable_cp:
-        run_cmd += f" --disable_cp"
-    run_cmd += fr' "{base_model}"'
-    run_cmd += fr' "{db_model}"'
-    run_cmd += fr' "{output_name}"'
+    run_cmd = [fr'"{PYTHON}"', fr'"{scriptdir}/tools/lycoris_locon_extract.py"']
 
-    log.info(run_cmd)
+    if is_sdxl:
+        run_cmd.append("--is_sdxl")
+    if is_v2:
+        run_cmd.append("--is_v2")
+
+    # Adding required parameters
+    run_cmd.append("--device")
+    run_cmd.append(device)
+    run_cmd.append("--mode")
+    run_cmd.append(mode)
+    run_cmd.append("--safetensors")
+
+    # Handling conditional parameters based on mode
+    if mode == "fixed":
+        run_cmd.append("--linear_dim")
+        run_cmd.append(str(linear_dim))
+        run_cmd.append("--conv_dim")
+        run_cmd.append(str(conv_dim))
+    elif mode == "threshold":
+        run_cmd.append("--linear_threshold")
+        run_cmd.append(str(linear_threshold))
+        run_cmd.append("--conv_threshold")
+        run_cmd.append(str(conv_threshold))
+    elif mode == "ratio":
+        run_cmd.append("--linear_ratio")
+        run_cmd.append(str(linear_ratio))
+        run_cmd.append("--conv_ratio")
+        run_cmd.append(str(conv_ratio))
+    elif mode == "quantile":
+        run_cmd.append("--linear_quantile")
+        run_cmd.append(str(linear_quantile))
+        run_cmd.append("--conv_quantile")
+        run_cmd.append(str(conv_quantile))
+
+    if use_sparse_bias:
+        run_cmd.append("--use_sparse_bias")
+
+    # Adding additional options
+    run_cmd.append("--sparsity")
+    run_cmd.append(str(sparsity))
+
+    if disable_cp:
+        run_cmd.append("--disable_cp")
+
+    # Add paths
+    run_cmd.append(fr'"{base_model}"')
+    run_cmd.append(fr'"{db_model}"')
+    run_cmd.append(fr'"{output_name}"')
 
     env = os.environ.copy()
-    env['PYTHONPATH'] = fr"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = (
+        f"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    )
+    # Adding an example of an environment variable that might be relevant
+    env["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-    # Run the command
-    subprocess.run(run_cmd, shell=True, env=env)
+    # Reconstruct the safe command string for display
+    command_to_run = " ".join(run_cmd)
+    log.info(f"Executing command: {command_to_run} with shell={use_shell}")
+            
+    # Run the command in the sd-scripts folder context
+    subprocess.run(command_to_run, env=env, shell=use_shell)
 
-    log.info('Done extracting...')
+
+    log.info("Done extracting...")
 
 
 ###
@@ -145,7 +174,7 @@ def update_mode(mode):
     return tuple(updates)
 
 
-def gradio_extract_lycoris_locon_tab(headless=False):
+def gradio_extract_lycoris_locon_tab(headless=False, use_shell: bool = False):
 
     current_model_dir = os.path.join(scriptdir, "outputs")
     current_base_model_dir = os.path.join(scriptdir, "outputs")
@@ -185,11 +214,16 @@ def gradio_extract_lycoris_locon_tab(headless=False):
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(db_model, lambda: None, lambda: {"choices": list_models(current_model_dir)}, "open_folder_small")
+            create_refresh_button(
+                db_model,
+                lambda: None,
+                lambda: {"choices": list_models(current_model_dir)},
+                "open_folder_small",
+            )
             button_db_model_file = gr.Button(
                 folder_symbol,
                 elem_id="open_folder_small",
-                elem_classes=['tool'],
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_db_model_file.click(
@@ -205,11 +239,16 @@ def gradio_extract_lycoris_locon_tab(headless=False):
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(base_model, lambda: None, lambda: {"choices": list_base_models(current_base_model_dir)}, "open_folder_small")
+            create_refresh_button(
+                base_model,
+                lambda: None,
+                lambda: {"choices": list_base_models(current_base_model_dir)},
+                "open_folder_small",
+            )
             button_base_model_file = gr.Button(
                 folder_symbol,
                 elem_id="open_folder_small",
-                elem_classes=['tool'],
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_base_model_file.click(
@@ -227,11 +266,16 @@ def gradio_extract_lycoris_locon_tab(headless=False):
                 allow_custom_value=True,
                 scale=2,
             )
-            create_refresh_button(output_name, lambda: None, lambda: {"choices": list_save_to(current_save_dir)}, "open_folder_small")
+            create_refresh_button(
+                output_name,
+                lambda: None,
+                lambda: {"choices": list_save_to(current_save_dir)},
+                "open_folder_small",
+            )
             button_output_name = gr.Button(
                 folder_symbol,
                 elem_id="open_folder_small",
-                elem_classes=['tool'],
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_output_name.click(
@@ -270,7 +314,9 @@ def gradio_extract_lycoris_locon_tab(headless=False):
                 show_progress=False,
             )
 
-            is_sdxl = gr.Checkbox(label="is SDXL", value=False, interactive=True, scale=1)
+            is_sdxl = gr.Checkbox(
+                label="is SDXL", value=False, interactive=True, scale=1
+            )
 
             is_v2 = gr.Checkbox(label="is v2", value=False, interactive=True, scale=1)
         with gr.Row():
@@ -406,6 +452,7 @@ def gradio_extract_lycoris_locon_tab(headless=False):
                 use_sparse_bias,
                 sparsity,
                 disable_cp,
+                gr.Checkbox(value=use_shell, visible=False),
             ],
             show_progress=False,
         )

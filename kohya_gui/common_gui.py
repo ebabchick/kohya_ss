@@ -6,9 +6,11 @@ from .custom_logging import setup_logging
 import os
 import re
 import gradio as gr
-import shutil
 import sys
+import shlex
 import json
+import math
+import shutil
 
 # Set up logging
 log = setup_logging()
@@ -19,6 +21,9 @@ save_style_symbol = "\U0001f4be"  # 💾
 document_symbol = "\U0001F4C4"  # 📄
 
 scriptdir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
+if os.name == "nt":
+    scriptdir = scriptdir.replace("\\", "/")
 
 # insert sd-scripts path into PYTHONPATH
 sys.path.insert(0, os.path.join(scriptdir, "sd-scripts"))
@@ -54,6 +59,30 @@ ALL_PRESET_MODELS = V2_BASE_MODELS + V_PARAMETERIZATION_MODELS + V1_MODELS + SDX
 
 ENV_EXCLUSION = ["COLAB_GPU", "RUNPOD_POD_ID"]
 
+
+def get_executable_path(executable_name: str = None) -> str:
+    """
+    Retrieve and sanitize the path to an executable in the system's PATH.
+
+    Args:
+    executable_name (str): The name of the executable to find.
+
+    Returns:
+    str: The full, sanitized path to the executable if found, otherwise an empty string.
+    """
+    if executable_name:
+        executable_path = shutil.which(executable_name)
+        if executable_path:
+            # Replace backslashes with forward slashes on Windows
+            # if os.name == "nt":
+            #     executable_path = executable_path.replace("\\", "/")
+            return executable_path
+        else:
+            return ""  # Return empty string if the executable is not found
+    else:
+        return ""  # Return empty string if no executable name is provided
+
+
 def calculate_max_train_steps(
     total_steps: int,
     train_batch_size: int,
@@ -70,6 +99,7 @@ def calculate_max_train_steps(
             * int(reg_factor)
         )
     )
+
 
 def check_if_model_exist(
     output_name: str, output_dir: str, save_model_as: str, headless: bool = False
@@ -292,24 +322,76 @@ def update_my_data(my_data):
         my_data["model_list"] = "custom"
 
     # Convert values to int if they are strings
-    for key in ["epoch", "save_every_n_epochs", "lr_warmup"]:
-        value = my_data.get(key, 0)
-        if isinstance(value, str) and value.strip().isdigit():
-            my_data[key] = int(value)
-        elif not value:
-            my_data[key] = 0
+    for key in [
+        "adaptive_noise_scale",
+        "clip_skip",
+        "epoch",
+        "gradient_accumulation_steps",
+        "keep_tokens",
+        "lr_warmup",
+        "max_data_loader_n_workers",
+        "max_train_epochs",
+        "save_every_n_epochs",
+        "seed",
+    ]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                my_data[key] = int(value)
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                my_data[key] = int(0)
+
+    # Convert values to int if they are strings
+    for key in ["lr_scheduler_num_cycles"]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                my_data[key] = int(value)
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                my_data[key] = int(1)
+                
+    for key in [
+        "max_train_steps",
+    ]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                my_data[key] = int(value)
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                my_data[key] = int(1600)
+
+    # Convert values to int if they are strings
+    for key in ["max_token_length"]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                my_data[key] = int(value)
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                my_data[key] = int(75)
 
     # Convert values to float if they are strings, correctly handling float representations
     for key in ["noise_offset", "learning_rate", "text_encoder_lr", "unet_lr"]:
-        value = my_data.get(key, 0)
-        if isinstance(value, str):
+        value = my_data.get(key)
+        if value is not None:
             try:
                 my_data[key] = float(value)
             except ValueError:
                 # Handle the case where the string is not a valid float
-                my_data[key] = 0
-        elif not value:
-            my_data[key] = 0
+                my_data[key] = float(0.0)
+
+    # Convert values to float if they are strings, correctly handling float representations
+    for key in ["lr_scheduler_power"]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                my_data[key] = float(value)
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                my_data[key] = float(1.0)
 
     # Update LoRA_type if it is set to LoCon
     if my_data.get("LoRA_type", "Standard") == "LoCon":
@@ -334,7 +416,28 @@ def update_my_data(my_data):
             my_data["xformers"] = "xformers"
         else:
             my_data["xformers"] = "none"
-
+            
+    # Convert use_wandb to log_with="wandb" if it is set to True
+    for key in ["use_wandb"]:
+        value = my_data.get(key)
+        if value is not None:
+            try:
+                if value == "True":
+                    my_data["log_with"] = "wandb"
+            except ValueError:
+                # Handle the case where the string is not a valid float
+                pass
+            
+        my_data.pop(key, None)
+        
+        
+    # Replace the lora_network_weights key with network_weights keeping the original value
+    for key in ["lora_network_weights"]:
+        value = my_data.get(key) # Get original value
+        if value is not None: # Check if the key exists in the dictionary
+            my_data["network_weights"] = value
+            my_data.pop(key, None)
+        
     return my_data
 
 
@@ -644,6 +747,10 @@ def add_pre_postfix(
         postfix (str, optional): Postfix to add to the content of the caption files.
         caption_file_ext (str, optional): Extension of the caption files.
     """
+    # Enforce that the provided extension is one of .caption, .cap, .txt
+    if caption_file_ext not in (".caption", ".cap", ".txt"):
+        log.error("Invalid caption file extension. Must be on of .caption, .cap, .txt")
+        return
 
     # If neither prefix nor postfix is provided, return early
     if prefix == "" and postfix == "":
@@ -667,13 +774,13 @@ def add_pre_postfix(
         # Check if the caption file does not exist
         if not os.path.exists(caption_file_path):
             # Create a new caption file with the specified prefix and/or postfix
-            with open(caption_file_path, "w", encoding="utf8") as f:
+            with open(caption_file_path, "w", encoding="utf-8") as f:
                 # Determine the separator based on whether both prefix and postfix are provided
                 separator = " " if prefix and postfix else ""
                 f.write(f"{prefix}{separator}{postfix}")
         else:
             # Open the existing caption file for reading and writing
-            with open(caption_file_path, "r+", encoding="utf8") as f:
+            with open(caption_file_path, "r+", encoding="utf-8") as f:
                 # Read the content of the caption file, stripping any trailing whitespace
                 content = f.read().rstrip()
                 # Move the file pointer to the beginning of the file
@@ -746,20 +853,42 @@ def find_replace(
         # Exit the function early
         return
 
+    # Check if the caption file extension is one of the supported extensions
+    if caption_file_ext not in [".caption", ".txt", ".txt2", ".cap"]:
+        log.error(
+            f"Unsupported file extension {caption_file_ext} for caption files. Please use .caption, .txt, .txt2, or .cap."
+        )
+        # Exit the function early
+        return
+
+    # Check if the folder path exists
+    if not os.path.exists(folder_path):
+        log.error(f"The provided path '{folder_path}' is not a valid folder.")
+        return
+
     # List all caption files in the folder
-    caption_files = [f for f in os.listdir(folder_path) if f.endswith(caption_file_ext)]
+    try:
+        caption_files = [
+            f for f in os.listdir(folder_path) if f.endswith(caption_file_ext)
+        ]
+    except Exception as e:
+        log.error(f"Error accessing folder {folder_path}: {e}")
+        return
 
     # Iterate over the list of caption files
     for caption_file in caption_files:
         # Construct the full path for each caption file
         file_path = os.path.join(folder_path, caption_file)
         # Read and replace text
-        with open(file_path, "r", errors="ignore") as f:
-            content = f.read().replace(search_text, replace_text)
+        try:
+            with open(file_path, "r", errors="ignore", encoding="utf-8") as f:
+                content = f.read().replace(search_text, replace_text)
 
-        # Write the updated content back to the file
-        with open(file_path, "w") as f:
-            f.write(content)
+            # Write the updated content back to the file
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            log.error(f"Error processing file {file_path}: {e}")
 
 
 def color_aug_changed(color_aug):
@@ -786,60 +915,6 @@ def color_aug_changed(color_aug):
     # If color augmentation is disabled, return a new checkbox with interactive set to True
     else:
         return gr.Checkbox(interactive=True)
-
-
-def save_inference_file(
-    output_dir: str,
-    v2: bool,
-    v_parameterization: bool,
-    output_name: str,
-) -> None:
-    """
-    Save inference file to the specified output directory.
-
-    Args:
-        output_dir (str): Path to the output directory.
-        v2 (bool): Flag indicating whether to use v2 inference.
-        v_parameterization (bool): Flag indicating whether to use v parameterization.
-        output_name (str): Name of the output file.
-    """
-    try:
-        # List all files in the directory
-        files = os.listdir(output_dir)
-    except Exception as e:
-        log.error(f"Error listing directory contents: {e}")
-        return  # Early return on failure
-
-    # Iterate over the list of files
-    for file in files:
-        # Check if the file starts with the value of output_name
-        if file.startswith(output_name):
-            # Check if it is a file or a directory
-            file_path = os.path.join(output_dir, file)
-            if os.path.isfile(file_path):
-                # Split the file name and extension
-                file_name, ext = os.path.splitext(file)
-
-                # Determine the source file path based on the v2 and v_parameterization flags
-                source_file_path = (
-                    rf"{scriptdir}/v2_inference/v2-inference-v.yaml"
-                    if v2 and v_parameterization
-                    else rf"{scriptdir}/v2_inference/v2-inference.yaml"
-                )
-
-                # Copy the source file to the current file, with a .yaml extension
-                try:
-                    log.info(
-                        f"Saving {source_file_path} as {output_dir}/{file_name}.yaml"
-                    )
-                    shutil.copy(
-                        source_file_path,
-                        f"{output_dir}/{file_name}.yaml",
-                    )
-                except Exception as e:
-                    log.error(
-                        f"Error copying file to {output_dir}/{file_name}.yaml: {e}"
-                    )
 
 
 def set_pretrained_model_name_or_path_input(
@@ -1028,7 +1103,7 @@ def get_str_or_default(kwargs, key, default_value=""):
         return str(value)
 
 
-def run_cmd_advanced_training(**kwargs):
+def run_cmd_advanced_training(run_cmd: list = [], **kwargs):
     """
     This function, run_cmd_advanced_training, dynamically constructs a command line string for advanced training
     configurations based on provided keyword arguments (kwargs). Each argument represents a different training parameter
@@ -1049,469 +1124,16 @@ def run_cmd_advanced_training(**kwargs):
         str: A command line string constructed based on the provided keyword arguments. This string includes the base
              command and additional parameters and flags tailored to the user's specifications for the training process
     """
-    run_cmd = ""
-
-    if "additional_parameters" in kwargs:
-        run_cmd += f' {kwargs["additional_parameters"]}'
-
-    if "block_lr" in kwargs and kwargs["block_lr"] != "":
-        run_cmd += f' --block_lr="{kwargs["block_lr"]}"'
-
-    if kwargs.get("bucket_no_upscale"):
-        run_cmd += " --bucket_no_upscale"
-
-    if "bucket_reso_steps" in kwargs:
-        run_cmd += f' --bucket_reso_steps={int(kwargs["bucket_reso_steps"])}'
-
-    if kwargs.get("cache_latents"):
-        run_cmd += " --cache_latents"
-
-    if kwargs.get("cache_latents_to_disk"):
-        run_cmd += " --cache_latents_to_disk"
-
-    if kwargs.get("cache_text_encoder_outputs"):
-        run_cmd += " --cache_text_encoder_outputs"
-
-    if (
-        "caption_dropout_every_n_epochs" in kwargs
-        and int(kwargs["caption_dropout_every_n_epochs"]) > 0
-    ):
-        run_cmd += f' --caption_dropout_every_n_epochs="{int(kwargs["caption_dropout_every_n_epochs"])}"'
-
-    caption_dropout_rate = kwargs.get("caption_dropout_rate")
-    if caption_dropout_rate and float(caption_dropout_rate) > 0:
-        run_cmd += f' --caption_dropout_rate="{caption_dropout_rate}"'
-
-    caption_extension = kwargs.get("caption_extension")
-    if caption_extension:
-        run_cmd += f' --caption_extension="{caption_extension}"'
-
-    clip_skip = kwargs.get("clip_skip")
-    if clip_skip and int(clip_skip) > 1:
-        run_cmd += f" --clip_skip={int(clip_skip)}"
-
-    color_aug = kwargs.get("color_aug")
-    if color_aug:
-        run_cmd += " --color_aug"
-
-    dataset_config = kwargs.get("dataset_config")
-    if dataset_config:
-        dataset_config = os.path.abspath(os.path.normpath(dataset_config))
-        run_cmd += f' --dataset_config="{dataset_config}"'
-
-    dataset_repeats = kwargs.get("dataset_repeats")
-    if dataset_repeats:
-        run_cmd += f' --dataset_repeats="{dataset_repeats}"'
-
-    debiased_estimation_loss = kwargs.get("debiased_estimation_loss")
-    if debiased_estimation_loss:
-        run_cmd += " --debiased_estimation_loss"
-
-    dim_from_weights = kwargs.get("dim_from_weights")
-    if dim_from_weights and kwargs.get(
-        "lora_network_weights"
-    ):  # Only if lora_network_weights is true
-        run_cmd += f" --dim_from_weights"
-
-    # Check if enable_bucket is true and both min_bucket_reso and max_bucket_reso are provided as part of the kwargs
-    if (
-        kwargs.get("enable_bucket")
-        and "min_bucket_reso" in kwargs
-        and "max_bucket_reso" in kwargs
-    ):
-        # Append the enable_bucket flag and min/max bucket resolution values to the run_cmd string
-        run_cmd += f' --enable_bucket --min_bucket_reso={kwargs["min_bucket_reso"]} --max_bucket_reso={kwargs["max_bucket_reso"]}'
-
-    in_json = kwargs.get("in_json")
-    if in_json:
-        run_cmd += f' --in_json="{in_json}"'
-
-    flip_aug = kwargs.get("flip_aug")
-    if flip_aug:
-        run_cmd += " --flip_aug"
-
-    fp8_base = kwargs.get("fp8_base")
-    if fp8_base:
-        run_cmd += " --fp8_base"
-
-    full_bf16 = kwargs.get("full_bf16")
-    if full_bf16:
-        run_cmd += " --full_bf16"
-
-    full_fp16 = kwargs.get("full_fp16")
-    if full_fp16:
-        run_cmd += " --full_fp16"
-
-    if (
-        "gradient_accumulation_steps" in kwargs
-        and int(kwargs["gradient_accumulation_steps"]) > 1
-    ):
-        run_cmd += f" --gradient_accumulation_steps={int(kwargs['gradient_accumulation_steps'])}"
-
-    if kwargs.get("gradient_checkpointing"):
-        run_cmd += " --gradient_checkpointing"
-
-    if "keep_tokens" in kwargs and int(kwargs["keep_tokens"]) > 0:
-        run_cmd += f' --keep_tokens="{int(kwargs["keep_tokens"])}"'
-
-    if "learning_rate" in kwargs:
-        run_cmd += f' --learning_rate="{kwargs["learning_rate"]}"'
-
-    if "learning_rate_te" in kwargs:
-        if kwargs["learning_rate_te"] == 0:
-            run_cmd += f' --learning_rate_te="0"'
-        else:
-            run_cmd += f' --learning_rate_te="{kwargs["learning_rate_te"]}"'
-
-    if "learning_rate_te1" in kwargs:
-        if kwargs["learning_rate_te1"] == 0:
-            run_cmd += f' --learning_rate_te1="0"'
-        else:
-            run_cmd += f' --learning_rate_te1="{kwargs["learning_rate_te1"]}"'
-
-    if "learning_rate_te2" in kwargs:
-        if kwargs["learning_rate_te2"] == 0:
-            run_cmd += f' --learning_rate_te2="0"'
-        else:
-            run_cmd += f' --learning_rate_te2="{kwargs["learning_rate_te2"]}"'
-
-    logging_dir = kwargs.get("logging_dir")
-    if logging_dir:
-        if logging_dir.startswith('"') and logging_dir.endswith('"'):
-            logging_dir = logging_dir[1:-1]
-        if os.path.exists(logging_dir):
-            run_cmd += rf' --logging_dir="{logging_dir}"'
-
-    log_tracker_name = kwargs.get("log_tracker_name")
-    if log_tracker_name:
-        run_cmd += rf' --log_tracker_name="{log_tracker_name}"'
-
-    log_tracker_config = kwargs.get("log_tracker_config")
-    if log_tracker_config:
-        if log_tracker_config.startswith('"') and log_tracker_config.endswith('"'):
-            log_tracker_config = log_tracker_config[1:-1]
-        if os.path.exists(log_tracker_config):
-            run_cmd += rf' --log_tracker_config="{log_tracker_config}"'
-
-    lora_network_weights = kwargs.get("lora_network_weights")
-    if lora_network_weights:
-        run_cmd += f' --network_weights="{lora_network_weights}"'  # Yes, the parameter is now called network_weights instead of lora_network_weights
-
-    lr_scheduler = kwargs.get("lr_scheduler")
-    if lr_scheduler:
-        run_cmd += f' --lr_scheduler="{lr_scheduler}"'
-
-    lr_scheduler_args = kwargs.get("lr_scheduler_args")
-    if lr_scheduler_args and lr_scheduler_args != "":
-        run_cmd += f" --lr_scheduler_args {lr_scheduler_args}"
-
-    lr_scheduler_num_cycles = kwargs.get("lr_scheduler_num_cycles")
-    if lr_scheduler_num_cycles and not lr_scheduler_num_cycles == "":
-        run_cmd += f' --lr_scheduler_num_cycles="{lr_scheduler_num_cycles}"'
-    else:
-        epoch = kwargs.get("epoch")
-        if epoch:
-            run_cmd += f' --lr_scheduler_num_cycles="{epoch}"'
-
-    lr_scheduler_power = kwargs.get("lr_scheduler_power")
-    if lr_scheduler_power and not lr_scheduler_power == "":
-        run_cmd += f' --lr_scheduler_power="{lr_scheduler_power}"'
-
-    lr_warmup_steps = kwargs.get("lr_warmup_steps")
-    if lr_warmup_steps:
-        if lr_scheduler == "constant":
-            log.info("Can't use LR warmup with LR Scheduler constant... ignoring...")
-        else:
-            run_cmd += f' --lr_warmup_steps="{lr_warmup_steps}"'
-
-    gpu_ids = kwargs.get("gpu_ids")
-    if gpu_ids:
-        run_cmd += f' --gpu_ids="{gpu_ids}"'
-
-    max_data_loader_n_workers = kwargs.get("max_data_loader_n_workers")
-    if max_data_loader_n_workers and not max_data_loader_n_workers == "":
-        run_cmd += f' --max_data_loader_n_workers="{max_data_loader_n_workers}"'
-
-    max_grad_norm = kwargs.get("max_grad_norm")
-    if max_grad_norm and max_grad_norm != "":
-        run_cmd += f' --max_grad_norm="{max_grad_norm}"'
-
-    max_resolution = kwargs.get("max_resolution")
-    if max_resolution:
-        run_cmd += f' --resolution="{max_resolution}"'
-
-    max_timestep = kwargs.get("max_timestep")
-    if max_timestep and int(max_timestep) < 1000:
-        run_cmd += f" --max_timestep={int(max_timestep)}"
-
-    max_token_length = kwargs.get("max_token_length")
-    if max_token_length and int(max_token_length) > 75:
-        run_cmd += f" --max_token_length={int(max_token_length)}"
-
-    max_train_epochs = kwargs.get("max_train_epochs")
-    if max_train_epochs and not max_train_epochs == "":
-        run_cmd += f" --max_train_epochs={max_train_epochs}"
-
-    max_train_steps = kwargs.get("max_train_steps")
-    if max_train_steps:
-        run_cmd += f' --max_train_steps="{max_train_steps}"'
-
-    mem_eff_attn = kwargs.get("mem_eff_attn")
-    if mem_eff_attn:
-        run_cmd += " --mem_eff_attn"
-
-    min_snr_gamma = kwargs.get("min_snr_gamma")
-    if min_snr_gamma and int(min_snr_gamma) >= 1:
-        run_cmd += f" --min_snr_gamma={int(min_snr_gamma)}"
-
-    min_timestep = kwargs.get("min_timestep")
-    if min_timestep and int(min_timestep) > 0:
-        run_cmd += f" --min_timestep={int(min_timestep)}"
-
-    mixed_precision = kwargs.get("mixed_precision")
-    if mixed_precision:
-        run_cmd += f' --mixed_precision="{mixed_precision}"'
-
-    multi_gpu = kwargs.get("multi_gpu")
-    if multi_gpu:
-        run_cmd += " --multi_gpu"
-
-    network_alpha = kwargs.get("network_alpha")
-    if network_alpha:
-        run_cmd += f' --network_alpha="{network_alpha}"'
-
-    network_args = kwargs.get("network_args")
-    if network_args and len(network_args):
-        run_cmd += f" --network_args{network_args}"
-
-    network_dim = kwargs.get("network_dim")
-    if network_dim:
-        run_cmd += f" --network_dim={network_dim}"
-
-    network_dropout = kwargs.get("network_dropout")
-    if network_dropout and network_dropout > 0.0:
-        run_cmd += f" --network_dropout={network_dropout}"
-
-    network_module = kwargs.get("network_module")
-    if network_module:
-        run_cmd += f" --network_module={network_module}"
-
-    network_train_text_encoder_only = kwargs.get("network_train_text_encoder_only")
-    if network_train_text_encoder_only:
-        run_cmd += " --network_train_text_encoder_only"
-
-    network_train_unet_only = kwargs.get("network_train_unet_only")
-    if network_train_unet_only:
-        run_cmd += " --network_train_unet_only"
-
-    no_half_vae = kwargs.get("no_half_vae")
-    if no_half_vae:
-        run_cmd += " --no_half_vae"
-
-    no_token_padding = kwargs.get("no_token_padding")
-    if no_token_padding:
-        run_cmd += " --no_token_padding"
-
-    if "noise_offset_type" in kwargs:
-        noise_offset_type = kwargs["noise_offset_type"]
-
-        if kwargs["noise_offset_type"] == "Original":
-            noise_offset = float(kwargs.get("noise_offset", 0))
-            if noise_offset:
-                run_cmd += f" --noise_offset={noise_offset}"
-
-            adaptive_noise_scale = float(kwargs.get("adaptive_noise_scale", 0))
-            if adaptive_noise_scale != 0 and noise_offset > 0:
-                run_cmd += f" --adaptive_noise_scale={adaptive_noise_scale}"
-
-        elif noise_offset_type == "Multires":
-            multires_noise_iterations = int(kwargs.get("multires_noise_iterations", 0))
-            if multires_noise_iterations > 0:
-                run_cmd += f' --multires_noise_iterations="{multires_noise_iterations}"'
-
-            multires_noise_discount = float(kwargs.get("multires_noise_discount", 0))
-            if multires_noise_discount > 0:
-                run_cmd += f' --multires_noise_discount="{multires_noise_discount}"'
-
-    num_machines = kwargs.get("num_machines")
-    if num_machines and int(num_machines) > 1:
-        run_cmd += f" --num_machines={int(num_machines)}"
-
-    num_processes = kwargs.get("num_processes")
-    if num_processes and int(num_processes) > 1:
-        run_cmd += f" --num_processes={int(num_processes)}"
-
-    num_cpu_threads_per_process = kwargs.get("num_cpu_threads_per_process")
-    if num_cpu_threads_per_process and int(num_cpu_threads_per_process) > 1:
-        run_cmd += f" --num_cpu_threads_per_process={int(num_cpu_threads_per_process)}"
-
-    optimizer_args = kwargs.get("optimizer_args")
-    if optimizer_args and optimizer_args != "":
-        run_cmd += f" --optimizer_args {optimizer_args}"
-
-    optimizer_type = kwargs.get("optimizer")
-    if optimizer_type:
-        run_cmd += f' --optimizer_type="{optimizer_type}"'
-
-    output_dir = kwargs.get("output_dir")
-    if output_dir:
-        if output_dir.startswith('"') and output_dir.endswith('"'):
-            output_dir = output_dir[1:-1]
-        if os.path.exists(output_dir):
-            run_cmd += rf' --output_dir="{output_dir}"'
-
-    output_name = kwargs.get("output_name")
-    if output_name and not output_name == "":
-        run_cmd += f' --output_name="{output_name}"'
-
-    persistent_data_loader_workers = kwargs.get("persistent_data_loader_workers")
-    if persistent_data_loader_workers:
-        run_cmd += " --persistent_data_loader_workers"
-
-    pretrained_model_name_or_path = kwargs.get("pretrained_model_name_or_path")
-    if pretrained_model_name_or_path:
-        run_cmd += (
-            rf' --pretrained_model_name_or_path="{pretrained_model_name_or_path}"'
-        )
-
-    prior_loss_weight = kwargs.get("prior_loss_weight")
-    if prior_loss_weight and not float(prior_loss_weight) == 1.0:
-        run_cmd += f" --prior_loss_weight={prior_loss_weight}"
-
-    random_crop = kwargs.get("random_crop")
-    if random_crop:
-        run_cmd += " --random_crop"
-
-    reg_data_dir = kwargs.get("reg_data_dir")
-    if reg_data_dir and len(reg_data_dir):
-        if reg_data_dir.startswith('"') and reg_data_dir.endswith('"'):
-            reg_data_dir = reg_data_dir[1:-1]
-        if os.path.isdir(reg_data_dir):
-            run_cmd += rf' --reg_data_dir="{reg_data_dir}"'
-
-    resume = kwargs.get("resume")
-    if resume:
-        run_cmd += f' --resume="{resume}"'
-
-    save_every_n_epochs = kwargs.get("save_every_n_epochs")
-    if save_every_n_epochs:
-        run_cmd += f' --save_every_n_epochs="{int(save_every_n_epochs)}"'
-
-    save_every_n_steps = kwargs.get("save_every_n_steps")
-    if save_every_n_steps and int(save_every_n_steps) > 0:
-        run_cmd += f' --save_every_n_steps="{int(save_every_n_steps)}"'
-
-    save_last_n_steps = kwargs.get("save_last_n_steps")
-    if save_last_n_steps and int(save_last_n_steps) > 0:
-        run_cmd += f' --save_last_n_steps="{int(save_last_n_steps)}"'
-
-    save_last_n_steps_state = kwargs.get("save_last_n_steps_state")
-    if save_last_n_steps_state and int(save_last_n_steps_state) > 0:
-        run_cmd += f' --save_last_n_steps_state="{int(save_last_n_steps_state)}"'
-
-    save_model_as = kwargs.get("save_model_as")
-    if save_model_as and not save_model_as == "same as source model":
-        run_cmd += f" --save_model_as={save_model_as}"
-
-    save_precision = kwargs.get("save_precision")
-    if save_precision:
-        run_cmd += f' --save_precision="{save_precision}"'
-
-    save_state = kwargs.get("save_state")
-    if save_state:
-        run_cmd += " --save_state"
-
-    scale_v_pred_loss_like_noise_pred = kwargs.get("scale_v_pred_loss_like_noise_pred")
-    if scale_v_pred_loss_like_noise_pred:
-        run_cmd += " --scale_v_pred_loss_like_noise_pred"
-
-    scale_weight_norms = kwargs.get("scale_weight_norms")
-    if scale_weight_norms and scale_weight_norms > 0.0:
-        run_cmd += f' --scale_weight_norms="{scale_weight_norms}"'
-
-    seed = kwargs.get("seed")
-    if seed and seed != "":
-        run_cmd += f' --seed="{seed}"'
-
-    shuffle_caption = kwargs.get("shuffle_caption")
-    if shuffle_caption:
-        run_cmd += " --shuffle_caption"
-
-    stop_text_encoder_training = kwargs.get("stop_text_encoder_training")
-    if stop_text_encoder_training and stop_text_encoder_training > 0:
-        run_cmd += f' --stop_text_encoder_training="{stop_text_encoder_training}"'
-
-    text_encoder_lr = kwargs.get("text_encoder_lr")
-    if text_encoder_lr and (float(text_encoder_lr) > 0):
-        run_cmd += f" --text_encoder_lr={text_encoder_lr}"
-
-    train_batch_size = kwargs.get("train_batch_size")
-    if train_batch_size:
-        run_cmd += f' --train_batch_size="{train_batch_size}"'
-
-    training_comment = kwargs.get("training_comment")
-    if training_comment and len(training_comment):
-        run_cmd += f' --training_comment="{training_comment}"'
-
-    train_data_dir = kwargs.get("train_data_dir")
-    if train_data_dir:
-        if train_data_dir.startswith('"') and train_data_dir.endswith('"'):
-            train_data_dir = train_data_dir[1:-1]
-        if os.path.exists(train_data_dir):
-            run_cmd += rf' --train_data_dir="{train_data_dir}"'
-
-    train_text_encoder = kwargs.get("train_text_encoder")
-    if train_text_encoder:
-        run_cmd += " --train_text_encoder"
-
-    unet_lr = kwargs.get("unet_lr")
-    if unet_lr and (float(unet_lr) > 0):
-        run_cmd += f" --unet_lr={unet_lr}"
-
-    use_wandb = kwargs.get("use_wandb")
-    if use_wandb:
-        run_cmd += " --log_with wandb"
-
-    v_parameterization = kwargs.get("v_parameterization")
-    if v_parameterization:
-        run_cmd += " --v_parameterization"
-
-    v_pred_like_loss = kwargs.get("v_pred_like_loss")
-    if v_pred_like_loss and float(v_pred_like_loss) > 0:
-        run_cmd += f' --v_pred_like_loss="{float(v_pred_like_loss)}"'
-
-    v2 = kwargs.get("v2")
-    if v2:
-        run_cmd += " --v2"
-
-    vae = kwargs.get("vae")
-    if vae and not vae == "":
-        if not os.path.exists(vae):
-            vae = os.path.join("models", "VAE", vae).replace(os.sep, "/")
-        if os.path.exists(vae):
-            run_cmd += f' --vae="{vae}"'
-
-    vae_batch_size = kwargs.get("vae_batch_size")
-    if vae_batch_size and int(vae_batch_size) > 0:
-        run_cmd += f' --vae_batch_size="{int(vae_batch_size)}"'
-
-    wandb_api_key = kwargs.get("wandb_api_key")
-    if wandb_api_key:
-        run_cmd += f' --wandb_api_key="{wandb_api_key}"'
-
-    wandb_run_name = kwargs.get("wandb_run_name")
-    if wandb_run_name:
-        run_cmd += f' --wandb_run_name="{wandb_run_name}"'
-
-    weighted_captions = kwargs.get("weighted_captions")
-    if weighted_captions:
-        run_cmd += " --weighted_captions"
-
-    xformers = kwargs.get("xformers")
-    if xformers and xformers == "xformers":
-        run_cmd += " --xformers"
-    elif xformers and xformers == "sdpa":
-        run_cmd += " --sdpa"
+    if "additional_parameters" in kwargs and kwargs["additional_parameters"] != "":
+        additional_parameters = kwargs["additional_parameters"].replace('"', "")
+        for arg in additional_parameters.split():
+            run_cmd.append(shlex.quote(arg))
+
+    if "max_data_loader_n_workers" in kwargs:
+        max_data_loader_n_workers = kwargs.get("max_data_loader_n_workers")
+        if max_data_loader_n_workers != "":
+            run_cmd.append("--max_data_loader_n_workers")
+            run_cmd.append(str(max_data_loader_n_workers))
 
     return run_cmd
 
@@ -1616,8 +1238,18 @@ def SaveConfigFile(
         if name not in exclusion
     }
 
+    # Check if the folder path for the file_path is valid
+    # Extrach folder path
+    folder_path = os.path.dirname(file_path)
+
+    # Check if the folder exists
+    if not os.path.exists(folder_path):
+        # If not, create the folder
+        os.makedirs(os.path.dirname(folder_path))
+        log.info(f"Creating folder {folder_path} for the configuration file...")
+
     # Save the data to the specified JSON file
-    with open(file_path, "w") as file:
+    with open(file_path, "w", encoding="utf-8") as file:
         json.dump(variables, file, indent=2)
 
 
@@ -1641,7 +1273,7 @@ def save_to_file(content):
 
     # Append content to the specified file
     try:
-        with open(file_path, "a") as file:
+        with open(file_path, "a", encoding="utf-8") as file:
             file.write(content + "\n")
     except IOError as e:
         print(f"Error: Could not write to file - {e}")
@@ -1842,10 +1474,41 @@ def is_file_writable(file_path: str) -> bool:
 
     try:
         # Attempt to open the file in append mode to check if it can be written to
-        with open(file_path, "a"):
+        with open(file_path, "a", encoding="utf-8"):
             pass
         # If the file can be opened, it is considered writable
         return True
     except IOError:
         # If an IOError occurs, the file cannot be written to
+        return False
+
+def print_command_and_toml(run_cmd, tmpfilename):
+    log.warning(
+        "Here is the trainer command as a reference. It will not be executed:\n"
+    )
+    # Reconstruct the safe command string for display
+    command_to_run = " ".join(run_cmd)
+
+    log.info(command_to_run)
+    print("")
+
+    log.info(f"Showing toml config file: {tmpfilename}")
+    print("")
+    with open(tmpfilename, "r", encoding="utf-8") as toml_file:
+        log.info(toml_file.read())
+    log.info(f"end of toml config file: {tmpfilename}")
+
+    save_to_file(command_to_run)
+    
+def validate_args_setting(input_string):
+    # Regex pattern to handle multiple conditions:
+    # - Empty string is valid
+    # - Single or multiple key/value pairs with exactly one space between pairs
+    # - No spaces around '=' and no spaces within keys or values
+    pattern = r'^(\S+=\S+)( \S+=\S+)*$|^$'
+    if re.match(pattern, input_string):
+        return True
+    else:
+        log.info(f"'{input_string}' is not a valid settings string.")
+        log.info("A valid settings string must consist of one or more key/value pairs formatted as key=value, with no spaces around the equals sign or within the value. Multiple pairs should be separated by a space.")
         return False

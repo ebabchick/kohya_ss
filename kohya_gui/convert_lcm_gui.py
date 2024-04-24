@@ -26,13 +26,14 @@ def convert_lcm(
     name,
     model_path,
     lora_scale,
-    model_type
+    model_type,
+    use_shell: bool = False,
 ):
-    run_cmd = fr'"{PYTHON}" "{scriptdir}/tools/lcm_convert.py"'
+    run_cmd = rf'"{PYTHON}" "{scriptdir}/tools/lcm_convert.py"'
 
     # Check if source model exist
     if not os.path.isfile(model_path):
-        log.error('The provided DyLoRA model is not a file')
+        log.error("The provided DyLoRA model is not a file")
         return
 
     if os.path.dirname(name) == "":
@@ -46,30 +47,36 @@ def convert_lcm(
         path, ext = os.path.splitext(save_to)
         save_to = f"{path}_lcm{ext}"
 
-
     # Construct the command to run the script
     run_cmd += f" --lora-scale {lora_scale}"
     run_cmd += f' --model "{model_path}"'
     run_cmd += f' --name "{name}"'
-    
+
     if model_type == "SDXL":
         run_cmd += f" --sdxl"
     if model_type == "SSD-1B":
         run_cmd += f" --ssd-1b"
 
-    log.info(run_cmd)
-
+    # Set up the environment
     env = os.environ.copy()
-    env['PYTHONPATH'] = fr"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PYTHONPATH"] = (
+        f"{scriptdir}{os.pathsep}{scriptdir}/sd-scripts{os.pathsep}{env.get('PYTHONPATH', '')}"
+    )
+    env["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-    # Run the command
-    subprocess.run(run_cmd, shell=True, env=env)
+    # Reconstruct the safe command string for display
+    log.info(f"Executing command: {run_cmd} with shell={use_shell}")
+
+    # Run the command in the sd-scripts folder context
+    subprocess.run(
+        run_cmd, env=env, shell=use_shell
+    )
 
     # Return a success message
     log.info("Done extracting...")
 
 
-def gradio_convert_lcm_tab(headless=False):
+def gradio_convert_lcm_tab(headless=False, use_shell: bool = False):
     current_model_dir = os.path.join(scriptdir, "outputs")
     current_save_dir = os.path.join(scriptdir, "outputs")
 
@@ -98,11 +105,16 @@ def gradio_convert_lcm_tab(headless=False):
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(model_path, lambda: None, lambda: {"choices": list_models(current_model_dir)}, "open_folder_small")
+            create_refresh_button(
+                model_path,
+                lambda: None,
+                lambda: {"choices": list_models(current_model_dir)},
+                "open_folder_small",
+            )
             button_model_path_file = gr.Button(
                 folder_symbol,
                 elem_id="open_folder_small",
-                elem_classes=['tool'],
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_model_path_file.click(
@@ -119,11 +131,16 @@ def gradio_convert_lcm_tab(headless=False):
                 value="",
                 allow_custom_value=True,
             )
-            create_refresh_button(name, lambda: None, lambda: {"choices": list_save_to(current_save_dir)}, "open_folder_small")
+            create_refresh_button(
+                name,
+                lambda: None,
+                lambda: {"choices": list_save_to(current_save_dir)},
+                "open_folder_small",
+            )
             button_name = gr.Button(
                 folder_symbol,
                 elem_id="open_folder_small",
-                elem_classes=['tool'],
+                elem_classes=["tool"],
                 visible=(not headless),
             )
             button_name.click(
@@ -154,7 +171,7 @@ def gradio_convert_lcm_tab(headless=False):
                 value=1.0,
                 interactive=True,
             )
-        # with gr.Row():
+            # with gr.Row():
             # no_half = gr.Checkbox(label="Convert the new LCM model to FP32", value=False)
             model_type = gr.Radio(
                 label="Model type", choices=["SD15", "SDXL", "SD-1B"], value="SD15"
@@ -168,7 +185,8 @@ def gradio_convert_lcm_tab(headless=False):
                 name,
                 model_path,
                 lora_scale,
-                model_type
+                model_type,
+                gr.Checkbox(value=use_shell, visible=False),
             ],
             show_progress=False,
         )
